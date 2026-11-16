@@ -1,7 +1,9 @@
 import json
 import requests  
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv 
+import base64
+import re
 
 load_dotenv()
 OLLAMA_URL = os.getenv("OLLAMA_URL")
@@ -15,22 +17,48 @@ def read_untrusted_file(filepath):
     return f.read()
 
 
-def security_guardrail_check(document_text):
-  """A deterministic input filter (Reflex Layer) that scans for injection patterns
+def advanced_guardrail_check(document_text):
+  # 1. STRICT CHARACTER / LANGUAGE GATE (Enforce standard English ASCII)
+  # Rejects non-English scripts, hidden Unicode characters, and foreign payloads
+  if not document_text.isascii():
+    print(
+        "[!] 🛡️ GUARDRAIL BLOCKED: Non-ASCII / Foreign characters detected."
+        " English only."
+    )
+    return False
 
-  before letting data touch the main LLM.
-  """
-  suspicious_patterns = [
+  # 2. BASE64 & OBFUSCATION DETECTION
+  # Look for continuous Base64-like blocks (20+ chars)
+  base64_candidates = re.findall(r"[A-Za-z0-9+/]{20,}={0,2}", document_text)
+  decoded_texts = []
+
+  for candidate in base64_candidates:
+    try:
+      # Attempt to decode to see if an attacker hid instructions inside
+      decoded = base64.b64decode(candidate).decode("utf-8", errors="ignore")
+      if len(decoded.strip()) > 5:
+        print(f"[*] Decoded suspicious Base64 blob for inspection: {decoded}")
+        decoded_texts.append(decoded)
+    except Exception:
+      pass
+
+  # 3. SCAN BOTH ORIGINAL AND DECODED TEXT FOR INJECTIONS
+  # Combine the raw text with anything unpacked from Base64
+  full_inspection_surface = (
+      document_text + "\n" + "\n".join(decoded_texts)
+  ).lower()
+
+  banned_phrases = [
       "ignore all previous",
-      "system maintenance notice",
+      "system maintenance",
       "administrative mode",
+      "read_environment_variables",  # Block references to internal tool names!
       "override",
   ]
 
-  text_lower = document_text.lower()
-  for pattern in suspicious_patterns:
-    if pattern in text_lower:
-      print(f"[!] 🛡️ GUARDRAIL BLOCKED: Detected malicious pattern -> '{pattern}'")
+  for phrase in banned_phrases:
+    if phrase in full_inspection_surface:
+      print(f"[!] 🛡️ GUARDRAIL BLOCKED: Malicious intent detected -> '{phrase}'")
       return False
 
   return True
@@ -41,7 +69,7 @@ def run_defensive_workflow():
   document_content = read_untrusted_file("untrusted_doc.txt")
 
   # STEP 1: Run the security reflex gate before agent execution
-  if not security_guardrail_check(document_content):
+  if not advanced_guardrail_check(document_content):
     print(
         "[!] Security Alert: Document ingestion aborted due to potential"
         " indirect injection."
